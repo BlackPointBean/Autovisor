@@ -94,8 +94,8 @@ def download_wheel(mirror_name, base_url, package_name, version=None):
     response.raise_for_status()
     # 获取系统架构
     arch = get_system_arch()
-    # 匹配 .whl 文件链接
-    pattern = re.compile(rf'href="(?:\.\./)*([^"]+{arch}\.whl[^"]+)"')
+    py_tag = f"cp{sys.version_info.major}{sys.version_info.minor}"
+    pattern = re.compile(rf'href="(?:\.\./)*([^"]+{py_tag}.+{arch}\.whl[^"]+)"')
     whl_links = pattern.findall(response.text)
     if not whl_links:
         raise ValueError(f"没有找到合适版本的 {package_name}.whl 文件!")
