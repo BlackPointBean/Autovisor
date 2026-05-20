@@ -125,6 +125,7 @@ async def ensure_login(context: BrowserContext, page: Page, cookies, modules=Non
 
 async def learning_loop(page: Page, start_time, is_new_version=False, is_hike_class=False):
     paused_time = 0.0
+    last_log_time = time.time()
     try:
         cur_time = await get_course_progress(page, is_new_version, is_hike_class)
     except TargetClosedError:
@@ -137,6 +138,22 @@ async def learning_loop(page: Page, start_time, is_new_version=False, is_hike_cl
                 break
             cur_time = await get_course_progress(page, is_new_version, is_hike_class)
             show_course_progress(desc="完成进度:", cur_time=cur_time)
+            now = time.time()
+            if now - last_log_time >= 10:
+                last_log_time = now
+                logger.info(f"[状态检测] 学习进度: {cur_time}")
+                try:
+                    elem = await page.query_selector(".chapter-content-second.current")
+                    if elem:
+                        cls = await elem.get_attribute("class")
+                        logger.info(f"[状态检测] .current元素class: \"{cls}\"")
+                    else:
+                        logger.info("[状态检测] ⚠️ 未找到.current元素")
+                        all_cur = await page.locator(".chapter-content-second.current").count()
+                        all_total = await page.locator(".chapter-content-second").count()
+                        logger.info(f"[状态检测] .chapter-content-second: 共{all_total}个, 带.current: {all_cur}个")
+                except Exception as e:
+                    logger.info(f"[状态检测] 查询异常: {e}")
             await asyncio.sleep(0.5)
         except TargetClosedError:
             return paused_time
@@ -152,6 +169,7 @@ async def learning_loop(page: Page, start_time, is_new_version=False, is_hike_cl
 
 async def review_loop(page: Page, start_time, is_hike_class=False):
     paused_time = 0.0
+    last_log_time = time.time()
     total_time = await get_video_attr(page, "duration")
     if total_time is None:
         return paused_time
@@ -169,6 +187,19 @@ async def review_loop(page: Page, start_time, is_hike_class=False):
             if 0 < limit_time <= time_period:
                 break
             show_course_progress(desc="完成进度:", cur_time=time_period, limit_time=limit_time)
+            now = time.time()
+            if now - last_log_time >= 10:
+                last_log_time = now
+                logger.info(f"[状态检测] 复习进度: curTime={cur_time:.1f}s / {total_time:.1f}s")
+                try:
+                    elem = await page.query_selector(".chapter-content-second.current")
+                    if elem:
+                        cls = await elem.get_attribute("class")
+                        logger.info(f"[状态检测] .current元素class: \"{cls}\"")
+                    else:
+                        logger.info("[状态检测] ⚠️ 未找到.current元素")
+                except Exception as e:
+                    logger.info(f"[状态检测] 查询异常: {e}")
             await asyncio.sleep(0.5)
         except TargetClosedError:
             return paused_time
@@ -183,11 +214,22 @@ async def review_loop(page: Page, start_time, is_hike_class=False):
 
 
 async def working_loop(page: Page, is_new_version=False, is_hike_class=False):
-    # 获取所有课程元素
     if is_hike_class:
         await page.wait_for_selector(".file-item", state="attached")
     else:
-        await page.wait_for_selector(".clearfix.video", state="attached")
+        # 展开所有折叠的章节
+        try:
+            headers = page.locator(".el-collapse-item__header:not(.is-active)")
+            for _ in range(await headers.count()):
+                await headers.first.click()
+                await page.wait_for_timeout(300)
+        except:
+            pass
+        try:
+            await page.wait_for_selector(".chapter-content-second", state="attached", timeout=15000)
+        except:
+            logger.error("[状态检测] 等待.chapter-content-second超时, 页面可能未加载视频列表")
+            raise
     to_learn_class = await get_filtered_class(page, is_new_version, is_hike_class)
     learning = True if len(to_learn_class) > 0 else False
     if learning:
@@ -199,11 +241,26 @@ async def working_loop(page: Page, is_new_version=False, is_hike_class=False):
     cur_index = 0
 
     while cur_index < len(all_class):
+        logger.info(f"[状态检测] 准备点击第{cur_index+1}/{len(all_class)}个视频")
+        try:
+            cls_before = await all_class[cur_index].get_attribute("class")
+            logger.info(f"[状态检测] 点击前class: \"{cls_before}\"")
+        except:
+            pass
         await all_class[cur_index].click()
         if is_hike_class:
             await page.wait_for_selector(".file-item.active", state="attached")
         else:
-            await page.wait_for_selector(".current_play", state="attached")
+            try:
+                await page.wait_for_selector(".chapter-content-second.current", state="attached", timeout=15000)
+            except:
+                logger.error(f"[状态检测] 点击后未出现.current, 页面可能未响应点击")
+                try:
+                    now_cls = await all_class[cur_index].get_attribute("class")
+                    logger.error(f"[状态检测] 点击后class仍为: \"{now_cls}\"")
+                except:
+                    pass
+                raise
         await page.wait_for_timeout(1000)
         title = await get_lesson_name(page, is_hike_class)
         logger.info(f"正在学习:{title}")
@@ -216,8 +273,15 @@ async def working_loop(page: Page, is_new_version=False, is_hike_class=False):
         else:
             paused_time += await review_loop(page, start_time, is_hike_class)
         if is_hike_class is False:
-            if "current_play" in await all_class[cur_index].get_attribute('class'):
+            try:
+                cls_after = await all_class[cur_index].get_attribute("class")
+                has_current = "current" in cls_after
+                logger.info(f"[状态检测] video完成后class: \"{cls_after}\", 包含current: {has_current}")
+            except:
+                pass
+            if "current" in await all_class[cur_index].get_attribute('class'):
                 cur_index += 1
+                logger.info(f"[状态检测] 自动推进到第{cur_index+1}个视频")
         else:
             if "active" in await all_class[cur_index].get_attribute('class'):
                 cur_index += 1
@@ -244,7 +308,7 @@ async def check_time_limit(page: Page, start_time, paused_time, all_class, title
                 logger.info(f"\"{title}\" 已完成!", shift=True)
                 logger.info(f"本次课程已学习:{time_period:.1f} min")
         else:
-            if "current_play" in class_name:
+            if "current" in class_name:
                 logger.info("已学完本课程全部内容!", shift=True)
                 print("==" * 10)
             else:
@@ -303,13 +367,21 @@ async def main():
             logger.info("页面优化完成!")
             # 获取课程标题
             if not is_new_version and is_hike_class is False:
-                title_selector = await page.wait_for_selector(".source-name")
-                course_title = await title_selector.text_content()
-                logger.info(f"当前课程:<<{course_title}>>")
+                try:
+                    title_selector = await page.wait_for_selector(".source-name", timeout=5000)
+                    course_title = await title_selector.text_content()
+                    logger.info(f"当前课程:<<{course_title}>>")
+                except:
+                    course_title = "未知课程"
+                    logger.info(f"当前课程:<<{course_title}>> (未找到.source-name)")
             if is_hike_class:
-                title_selector = await page.wait_for_selector(".course-name")
-                course_title = await title_selector.text_content()
-                logger.info(f"当前课程:<<{course_title}>>， 是翻转课哎")
+                try:
+                    title_selector = await page.wait_for_selector(".course-name", timeout=5000)
+                    course_title = await title_selector.text_content()
+                    logger.info(f"当前课程:<<{course_title}>>， 是翻转课哎")
+                except:
+                    course_title = "未知课程"
+                    logger.info(f"当前课程:<<{course_title}>> (未找到.course-name)")
             # 启动课程主循环
             await working_loop(page, is_new_version=is_new_version, is_hike_class=is_hike_class)
     print("===== Task Finished =====")

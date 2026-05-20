@@ -25,34 +25,29 @@ async def move_mouse(page: Page):
 
 # 获取课程进度
 async def get_course_progress(page: Page, is_new_version=False, is_hike_class=False):
-    curtime = "0%"
     await move_mouse(page)
     if is_hike_class:
         cur_play = await page.query_selector(".file-item.active")
         if not cur_play:
             return "100%"
         progress = await cur_play.query_selector(".rate")
-    else:
-        cur_play = await page.query_selector(".current_play")
-        if not cur_play:
-            return "100%"
-        progress = await cur_play.query_selector(".progress-num")
-    if not progress:
-        if not is_hike_class:
-            if is_new_version:
-                progress_ele = await cur_play.query_selector(".progress-num")
-                progress = await progress_ele.text_content()
-                finish = progress == "100%"
-            else:
-                finish = await cur_play.query_selector(".time_icofinish")
-        else:
+        if not progress:
             finish = await cur_play.query_selector(".icon-finish")
-        if finish:
-            curtime = "100%"
-    else:
-        curtime = await progress.text_content()
+            return "100%" if finish else "0%"
+        return await progress.text_content()
 
-    return curtime
+    cur_play = await page.query_selector(".chapter-content-second.current")
+    if not cur_play:
+        return "100%"
+    finish = await cur_play.query_selector(".finish-icon")
+    if finish:
+        return "100%"
+    progress = await cur_play.query_selector(".el-progress")
+    if progress:
+        value = await progress.get_attribute("aria-valuenow")
+        if value:
+            return f"{value}%"
+    return "0%"
 
 
 # 打印课程播放进度
