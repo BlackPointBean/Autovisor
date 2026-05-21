@@ -99,9 +99,9 @@ def download_wheel(mirror_name, base_url, package_name, version=None):
     # 按架构筛选
     arch_tag = f"-{arch}.whl"
     whl_links = [link for link in whl_links if arch_tag in link]
-    # 按 Python 版本筛选
-    py_tag = f"-cp{sys.version_info.major}{sys.version_info.minor}-"
-    whl_links = [link for link in whl_links if py_tag in link]
+    # 按 Python 版本筛选（精确版本 或 abi3 兼容版本）
+    py_ver = f"cp{sys.version_info.major}{sys.version_info.minor}"
+    whl_links = [link for link in whl_links if f"-{py_ver}-" in link or "-abi3-" in link]
     if not whl_links:
         raise ValueError(f"没有找到合适版本的 {package_name}.whl 文件!")
 
@@ -147,24 +147,41 @@ def is_installed(package, version):
         return None, False
 
 
-def install_package(package, version, mirror_name, base_url):
+def install_package(package, version, mirrors):
     alias = mapping[package]
     res_dir = get_res_dir()
     logger.info(f"{package}-{version} 未安装，开始下载...")
 
-    try:
-        wheel_path = download_wheel(mirror_name, base_url, package, version)
-        extract_whl(wheel_path, res_dir)
-        add_runtime_search_paths(res_dir)
-        logger.info(f"{package}-{version} 安装完成!")
+    for mirror_name, base_url in mirrors.items():
+        try:
+            # 测试镜像连通性
+            requests.get(base_url + "/simple/0", headers=config.headers, timeout=5)
+        except requests.exceptions.RequestException:
+            logger.warn(f"{mirror_name} 镜像源 不可用，尝试下一个...")
+            continue
 
-        os.remove(wheel_path)  # 清理下载的 .whl 文件
-        return import_module(alias)
+        try:
+            wheel_path = download_wheel(mirror_name, base_url, package, version)
+            extract_whl(wheel_path, res_dir)
+            add_runtime_search_paths(res_dir)
+            logger.info(f"{package}-{version} 安装完成!")
 
-    except Exception as e:
-        error_message = f"{package}-{version} 处理失败！"
-        logger.log_exception(error_message, e)
-        return None
+            os.remove(wheel_path)  # 清理下载的 .whl 文件
+            return import_module(alias)
+
+        except requests.exceptions.RequestException:
+            logger.warn(f"{mirror_name} 镜像源 下载失败，尝试下一个...")
+            continue
+        except ValueError as e:
+            logger.warn(f"{mirror_name} 镜像源 没有匹配的 wheel: {e}，尝试下一个...")
+            continue
+        except Exception as e:
+            logger.warn(f"{mirror_name} 镜像源 处理失败: {e}，尝试下一个...")
+            continue
+
+    error_message = f"{package}-{version} 处理失败！所有镜像源均不可用。"
+    logger.log_exception(error_message, None)
+    return None
 
 
 # 下载器,启动!
@@ -173,19 +190,13 @@ def start():
     res_dir = get_res_dir()
     os.makedirs(res_dir, exist_ok=True)
     add_runtime_search_paths(res_dir)
-    mirror_name, base_url = None, None  # 避免重复测试镜像
     for package, version in packages.items():
         module, exist = is_installed(package, version)
         if not exist:
-            if not mirror_name:  # 仅在首次遇到导入失败时测试镜像
-                mirror_name, base_url = test_mirrors()
-                if not mirror_name:  # 如果所有镜像都失败，直接退出
-                    logger.error("没有可用的镜像源，程序终止!")
-                    sys.exit(-1)
-            module = install_package(package, version, mirror_name, base_url)
+            module = install_package(package, version, config.mirrors)
             if not module:
                 logger.save()
-                sys.exit(-1)  # 下载或安装失败，立即退出
+                sys.exit(-1)
         modules.append(module)
 
     return modules
